@@ -1,0 +1,892 @@
+---
+title: "Warming tolerance of fish is remarkably consistent across life stages"
+subtitle: "Data processing and analyses"
+author: "Cowan et al. 2026"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+    fig-width: 8
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+editor: source
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+# Run every chunk from the project root, wherever the .qmd itself sits.
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_chunk$set(dev = "png", dpi = 500)
+```
+
+```{r}
+#| label: packages
+
+library(readxl)     # read the .xlsx workbook
+library(dplyr)      # data wrangling
+library(tidyr)      # pivot_wider / reshaping
+library(ggplot2)    # figures
+library(patchwork)  # compose the per-species + summary panel figure
+library(brms)       # Bayesian mixed model
+library(emmeans)    # estimated marginal means & contrasts
+library(posterior)  # convergence diagnostics (summarise_draws)
+library(coda)       # as.mcmc() to extract posterior draws of emmeans
+library(multcompView)  # compact letter display for Figure 1
+
+# Reproducibility & Stan backend --------------------------------------------
+set.seed(123)
+options(brms.backend = "cmdstanr")   # cmdstan is installed; faster & lighter
+
+# Data source
+xlsx <- "data/Life_stages_project_all_data.xlsx"
+
+# The four life stages, in developmental order -------------------------------
+STAGE_LEVELS <- c("Embryo", "Larva", "Immature", "Spawner")
+
+# Colour palette for each species
+species_cols <- c(Atlantic_salmon = "#F4A261", Brook_trout   = "#6A994E",
+                  Sand_goby       = "#7570B3", Two_spot_goby = "#E9C46A",
+                  Stickleback     = "#0B4F6C", Black_goby    = "#A26769",
+                  Pumpkinseed     = "#C06C84", Zebrafish     = "#43AA8B")
+
+# Parse numbers that may use a decimal comma (European locale) or the literal
+# string "NA". Bad values become NA.
+num_eu <- function(x) suppressWarnings(as.numeric(gsub(",", ".", as.character(x))))
+
+# Trim the unicode spaces base trimws() leaves in place. Some stage labels
+# ("Juvenile ") end in a non-breaking space, which breaks the recode() calls.
+norm_ws <- function(x) {
+  weird <- intToUtf8(c(0x00A0, 0x2007, 0x200B, 0x202F, 0x3000), multiple = TRUE)
+  x <- gsub(paste0("[", paste(weird, collapse = ""), "]"), " ", as.character(x))
+  trimws(x)
+}
+```
+
+# Data import and cleaning
+
+Each block reads the worksheet for one species. We excluded embryos that hatched
+during the trial, because hatching removes the CTmax endpoint. We also excluded
+missing CTmax values and records flagged with other problems. We standardised
+the life-stage columns to four levels: embryo, larva, immature and spawner.
+
+## Zebrafish
+
+Load and filter data for zebrafish (*Danio rerio*).
+
+```{r}
+#| label: clean-zebrafish
+
+zebrafish <- read_excel(xlsx, "Zebrafish") %>%
+  filter(is.na(Hatched_during_trial) | Hatched_during_trial != "Y") %>%
+  filter(!is.na(CTmax)) %>%
+  mutate(
+    Species       = "Zebrafish",
+    LifeStage     = recode(norm_ws(Lifestage), "Larvae" = "Larva", "Juvenile" = "Immature"),
+    CTmax         = as.numeric(CTmax),
+    UniqueTrialID = paste("Zebrafish", LifeStage, Trial_no),
+    Ramping_rate  = 18
+  ) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Two-spot goby
+
+Load and filter data for two-spot goby (*Gobiusculus flavescens*).
+
+```{r}
+#| label: clean-twospot
+
+two_spot <- read_excel(xlsx, "Two_spot") %>%
+  mutate(CTmax = num_eu(CTmax)) %>%
+  filter(!is.na(CTmax)) %>%
+  mutate(
+    Species       = "Two_spot_goby",
+    LifeStage     = recode(norm_ws(Lifestage),
+                           "Larvae" = "Larva", "Juvenile" = "Immature", "Adult" = "Spawner"),
+    UniqueTrialID = paste("Two_spot_goby", LifeStage, Trial_nr.),
+    Ramping_rate  = 18
+  ) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Sand goby
+
+Load and filter data for sand goby (*Pomatoschistus minutus*).
+
+```{r}
+#| label: clean-sandgoby
+
+sand_goby <- read_excel(xlsx, "Sand_goby") %>%
+  mutate(
+    Species       = "Sand_goby",
+    LifeStage     = recode(norm_ws(LifeStage), "Larvae" = "Larva", "Non-spawner" = "Immature"),
+    CTmax         = as.numeric(CTmax),
+    UniqueTrialID = paste("Sand_goby", LifeStage, Trial_no),
+    Ramping_rate  = 18
+  ) %>%
+  filter(!is.na(CTmax)) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Black goby
+
+Load and filter data for black goby (*Gobius niger*). We also excluded one
+faulty record (trial 9, individual 1) and seven observations for larvae in which
+the assay was compromised.
+
+```{r}
+#| label: clean-blackgoby
+
+bg <- read_excel(xlsx, "Black_goby") %>% mutate(LifeStage = norm_ws(LifeStage))
+
+bg_embryo <- bg %>%
+  filter(LifeStage == "Embryo") %>%
+  filter(is.na(Hatched) | Hatched != "Yes") %>%
+  filter(!(Trial_no == 9 & Individual == 1)) %>%
+  filter(!is.na(CTmax))
+
+bg_larva <- bg %>%
+  filter(LifeStage == "Larvae") %>%
+  filter(!(Individual %in% c(1, 20, 37, 38, 39, 40, 47)))
+
+bg_adult <- bg %>%
+  filter(LifeStage %in% c("Adult", "Spawner"))
+
+black_goby <- bind_rows(bg_embryo, bg_larva, bg_adult) %>%
+  mutate(
+    Species    = "Black_goby",
+    LifeStage  = recode(LifeStage, "Larvae" = "Larva", "Adult" = "Immature"),
+    trial_stg  = if_else(LifeStage %in% c("Immature", "Spawner"), "Adult", LifeStage),
+    UniqueTrialID = paste("Black_goby", trial_stg, Trial_no),
+    CTmax      = as.numeric(CTmax),
+    Ramping_rate = 18
+  ) %>%
+  filter(!is.na(CTmax)) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Three-spined stickleback
+
+Load and filter data for three-spined stickleback (*Gasterosteus aculeatus*).
+
+```{r}
+#| label: clean-stickleback
+
+stickleback <- read_excel(xlsx, "Stickleback") %>%
+  filter(is.na(Hatched) | Hatched != "Yes") %>%
+  mutate(CTmax = as.numeric(CTmax)) %>%
+  filter(!is.na(CTmax)) %>%
+  mutate(
+    Species       = "Stickleback",
+    LifeStage     = recode(norm_ws(LifeStage), "Larvae" = "Larva"),
+    UniqueTrialID = paste("Stickleback", LifeStage, Trial_no),
+    Ramping_rate  = 18
+  ) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Atlantic salmon
+
+Load and filter data for Atlantic salmon (*Salmo salar*). We treated alevins as
+larvae and post-smolts as immatures.
+
+```{r}
+#| label: clean-salmon
+
+salmon <- read_excel(xlsx, "Atlantic_salmon") %>%
+  filter(is.na(Hatched) | Hatched != "Y") %>%
+  mutate(CTmax = num_eu(CTmax)) %>%
+  filter(!is.na(CTmax)) %>%
+  mutate(
+    Species       = "Atlantic_salmon",
+    LifeStage     = recode(norm_ws(Life_stage), "Alevin" = "Larva", "PostSmolt" = "Immature"),
+    UniqueTrialID = paste("Atlantic_salmon", LifeStage, Trial_no),
+    Ramping_rate  = `Ramping_rate_C/h`
+  ) %>%
+  filter(LifeStage %in% STAGE_LEVELS) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Brook trout
+
+Load and filter data for brook trout (*Salvelinus fontinalis*). The larval stage
+was not assayed for this species. Of the 102 fish first recorded as spawners, 55
+could not be confidently assigned as spawners and were thus excluded.
+
+```{r}
+#| label: clean-brooktrout
+
+brook_trout <- read_excel(xlsx, "Brook_trout") %>%
+  filter(!is.na(CTmax)) %>%
+  mutate(
+    Species       = "Brook_trout",
+    LifeStage     = recode(norm_ws(life_stage), "Juvenile" = "Immature"),
+    CTmax         = as.numeric(CTmax),
+    UniqueTrialID = paste("Brook_trout", LifeStage, trial),
+    Ramping_rate  = 18
+  ) %>%
+  filter(LifeStage %in% STAGE_LEVELS) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Pumpkinseed sunfish
+
+Load and filter data for pumpkinseed sunfish (*Lepomis gibbosus*).
+
+```{r}
+#| label: clean-pumpkinseed
+
+pumpkinseed <- read_excel(xlsx, "Pumpkinseed") %>%
+  mutate(Stage = norm_ws(Stage)) %>%
+  mutate(
+    Species   = "Pumpkinseed",
+    LifeStage = recode(Stage,
+                       "Reproductive Adult" = "Spawner", "Adult" = "Immature", "Larvae" = "Larva"),
+    CTmax     = if_else(LifeStage %in% c("Immature", "Spawner"),
+                        as.numeric(Ctmax_Han), as.numeric(Ctmax_FireSting)),
+    UniqueTrialID = paste("Pumpkinseed", LifeStage, Trial),
+    Ramping_rate  = 18
+  ) %>%
+  filter(!is.na(CTmax)) %>%
+  select(Species, LifeStage, CTmax, UniqueTrialID, Ramping_rate)
+```
+
+## Combine all species
+
+CTmax varies with ramping rate, so we only analysed measurements taken using a
+consistent ramping rate across life stages (18 °C h⁻¹).
+
+```{r}
+#| label: combine
+
+AllSpecies <- bind_rows(
+  zebrafish, two_spot, sand_goby, black_goby,
+  stickleback, salmon, brook_trout, pumpkinseed
+) %>%
+  mutate(
+    LifeStage     = factor(LifeStage, levels = STAGE_LEVELS),
+    Species       = factor(Species),
+    UniqueTrialID = factor(UniqueTrialID)
+  )
+
+# a stage label outside STAGE_LEVELS would silently become NA above
+stopifnot(!anyNA(AllSpecies$LifeStage))
+# every retained measurement used the same ramping rate
+stopifnot(all(AllSpecies$Ramping_rate == 18))
+
+write.csv(AllSpecies, "output/AllSpecies_clean.csv", row.names = FALSE)
+```
+
+## Sample sizes
+
+Total sample sizes after data curation.
+
+```{r}
+#| label: total-sample-size
+
+total_tbl <- data.frame(
+  Individuals = nrow(AllSpecies),
+  Trials      = nlevels(droplevels(AllSpecies$UniqueTrialID)),
+  Species     = nlevels(droplevels(AllSpecies$Species))
+)
+knitr::kable(total_tbl, caption = "Total sample sizes after data curation.")
+```
+
+Individuals per species and life stage.
+
+```{r}
+#| label: sample-sizes
+
+sp_labels <- c(
+  Atlantic_salmon = "Atlantic salmon (<i>Salmo salar</i>)",
+  Black_goby      = "Black goby (<i>Gobius niger</i>)",
+  Brook_trout     = "Brook trout (<i>Salvelinus fontinalis</i>)",
+  Pumpkinseed     = "Pumpkinseed sunfish (<i>Lepomis gibbosus</i>)",
+  Sand_goby       = "Sand goby (<i>Pomatoschistus minutus</i>)",
+  Stickleback     = "Three-spined stickleback (<i>Gasterosteus aculeatus</i>)",
+  Two_spot_goby   = "Two-spot goby (<i>Gobiusculus flavescens</i>)",
+  Zebrafish       = "Zebrafish (<i>Danio rerio</i>)"
+)
+
+n_wide <- AllSpecies %>%
+  count(Species, LifeStage) %>%
+  pivot_wider(names_from = LifeStage, values_from = n, values_fill = 0) %>%
+  arrange(Species) %>%
+  select(Species, all_of(STAGE_LEVELS))
+n_wide$Total <- rowSums(n_wide[, STAGE_LEVELS])
+
+write.csv(n_wide, "output/sample_sizes.csv", row.names = FALSE)
+
+col_totals <- colSums(n_wide[, c(STAGE_LEVELS, "Total")])
+disp <- n_wide %>% mutate(Species = sp_labels[as.character(Species)])
+disp <- rbind(disp,
+              data.frame(Species = "<b>Total</b>", as.list(col_totals),
+                         check.names = FALSE))
+
+knitr::kable(disp, escape = FALSE, align = c("l", rep("r", 5)),
+             caption = "Sample sizes per species and life stage.")
+```
+
+# Bayesian mixed model (brms)
+
+We fitted a Bayesian linear mixed model to model variation in upper thermal
+limits across life stages using the brms package (Bürkner 2017; version 2.23.0).
+We fitted life stage as a fixed effect without an intercept, so that mean upper
+thermal limits were estimated for each stage rather than as a difference from a
+reference stage. We used species identity as a random effect with uncorrelated
+life-stage slopes. Because individuals tested within the same trial are not
+independent, we also added trial identity as a random intercept. The model
+structure was as follows:
+
+$$\texttt{CTmax} \sim 0 + \texttt{LifeStage} + (0 + \texttt{LifeStage}\ ||\ \texttt{Species}) + (1\ |\ \texttt{UniqueTrialID})$$
+
+During data exploration, we also noticed that CTmax varied far more among
+embryos than later life stages (i.e. heteroscedasticity). We therefore let the
+residual standard deviation differ among stages (`sigma ~ 0 + LifeStage`).
+
+We used weakly informative priors: `Normal(30, 10)` on the life-stage means,
+`Normal(0, 2)` on the log-scale residual standard deviations, and half
+`Student-t(3, 0, 5)` on the random-effect standard deviations. We ran four
+chains of 8,000 iterations, with adapt_delta set to 0.95 and maximum tree depth
+to 12, and checked convergence using R-hat, effective sample sizes, divergent
+transitions and E-BFMI.
+
+## Fit
+
+```{r}
+#| label: fit-model-random
+#| output: false
+
+form <- bf(
+  CTmax ~ 0 + LifeStage + (0 + LifeStage || Species) + (1 | UniqueTrialID),
+  sigma ~ 0 + LifeStage
+)
+priors <- c(
+  prior(normal(30, 10),     class = "b"),                  # mean CTmax per stage
+  prior(normal(0, 2),       class = "b", dpar = "sigma"),  # log residual SD per stage
+  prior(student_t(3, 0, 5), class = "sd")                  # random-effect SDs
+)
+brms_model <- brm(
+  formula = form, family = gaussian(), data = AllSpecies,
+  prior = priors, chains = 4, cores = 4, iter = 8000, seed = 123,
+  control = list(adapt_delta = 0.95, max_treedepth = 12),
+  silent  = 2, refresh = 0,
+  file        = "output/brms_model",
+  file_refit  = "on_change"
+)
+```
+
+```{r}
+#| label: model-summary-random
+summary(brms_model)
+```
+
+## Diagnostics
+
+```{r}
+#| label: diag-random
+
+# R-hat, ESS, divergences, treedepth and E-BFMI against their usual thresholds.
+sampler_diagnostics <- function(model, max_td) {
+  np <- brms::nuts_params(model)
+  nd <- brms::ndraws(model)
+  conv <- posterior::summarise_draws(posterior::as_draws_df(model),
+                                     "rhat", "ess_bulk", "ess_tail")
+  ebfmi <- np |>
+    dplyr::filter(Parameter == "energy__") |>
+    dplyr::group_by(Chain) |>
+    dplyr::summarise(e = sum(diff(Value)^2) / sum((Value - mean(Value))^2),
+                     .groups = "drop")
+  ndiv <- sum(np$Value[np$Parameter == "divergent__"])
+  ntd  <- sum(np$Value[np$Parameter == "treedepth__"] == max_td)
+  mr   <- max(conv$rhat, na.rm = TRUE)
+  eb   <- min(conv$ess_bulk, na.rm = TRUE)
+  et   <- min(conv$ess_tail, na.rm = TRUE)
+  me   <- min(ebfmi$e)
+  data.frame(
+    Diagnostic = c("Max split-R-hat", "Min bulk-ESS", "Min tail-ESS",
+                   "Divergent transitions", "Max-treedepth hits", "Min E-BFMI"),
+    Value = c(round(mr, 4), round(eb), round(et), ndiv, ntd, round(me, 3)),
+    Threshold = c("< 1.01", "> 400", "> 400",
+                  paste0("< 0.5% of ", nd), paste0("< 0.5% of ", nd), "> 0.2"),
+    Status = c(ifelse(mr < 1.01, "OK", "CHECK"),
+               ifelse(eb > 400, "OK", "CHECK"),
+               ifelse(et > 400, "OK", "CHECK"),
+               ifelse(ndiv / nd < 0.005, "OK", "CHECK"),
+               ifelse(ntd / nd < 0.005, "OK", "CHECK"),
+               ifelse(me > 0.2, "OK", "CHECK"))
+  )
+}
+
+diagnostics <- sampler_diagnostics(brms_model, max_td = 12)
+write.csv(diagnostics, "output/model_diagnostics.csv", row.names = FALSE)
+knitr::kable(diagnostics,
+             caption = "Sampler convergence diagnostics (all parameters).")
+```
+
+```{r}
+#| label: diag-random-plots
+#| fig-width: 9
+#| fig-height: 6
+
+brms::mcmc_plot(brms_model, type = "trace", variable = "^b_", regex = TRUE)
+pp_check(brms_model, ndraws = 100)
+```
+
+## Overall life-stage means
+
+Here, we present the predicted CTmax for each life stage, across species. We
+used emmeans to generate posterior medians and 95% highest posterior density
+intervals from the fitted model.
+
+```{r}
+#| label: emmeans-overall-means
+
+emm_overall <- emmeans(brms_model, ~ LifeStage, re_formula = NA)
+overall_means_tab <- as.data.frame(
+  summary(emm_overall, point.est = median, level = 0.95)
+)
+write.csv(overall_means_tab, "output/overall_lifestage_means.csv", row.names = FALSE)
+knitr::kable(overall_means_tab, digits = 2,
+             caption = "Overall life-stage marginal means (posterior median, 95% HPD interval).")
+```
+
+## Overall life-stage contrasts
+
+Here, we present contrasts between life stages, estimated using emmeans from the
+fitted model.
+
+```{r}
+#| label: emmeans-overall-random
+
+overall_tab <- as.data.frame(
+  summary(pairs(emm_overall, adjust = "none"), point.est = median, level = 0.95)
+)
+write.csv(overall_tab, "output/overall_lifestage_contrasts.csv",
+          row.names = FALSE)
+knitr::kable(overall_tab, digits = 3,
+             caption = "Overall pairwise life-stage contrasts (posterior median, 95% HPD interval).")
+```
+
+## Species-specific life-stage contrasts
+
+Here, we present species-specific contrasts between life stages. We estimated
+these life-stage differences using emmeans and present posterior medians and 95%
+highest posterior density intervals. Note that we did not measure the CTmax of
+brook trout larvae, but the model returns a prediction for this life stage
+through Bayesian data augmentation.
+
+```{r}
+#| label: emmeans-species-random
+
+emm_species <- emmeans(brms_model, ~ LifeStage | Species,
+                              re_formula = ~ (0 + LifeStage || Species))
+species_tab <- as.data.frame(
+  summary(pairs(emm_species, adjust = "none"), point.est = median, level = 0.95)
+) %>%
+  mutate(Species = gsub("_", " ", as.character(Species)))
+write.csv(species_tab, "output/species_lifestage_contrasts.csv",
+          row.names = FALSE)
+knitr::kable(species_tab, digits = 3,
+             caption = "Species-specific pairwise life-stage contrasts (posterior median, 95% HPD interval).")
+```
+
+# Figures
+
+## Figure 1: CTmax across life stages in all eight species
+
+```{r}
+#| label: fig1-data
+
+# Species ordered by acclimation temperature, which is also the panel order.
+fig1_levels <- c("Atlantic_salmon", "Brook_trout", "Sand_goby", "Two_spot_goby",
+                 "Stickleback", "Black_goby", "Pumpkinseed", "Zebrafish")
+fig1_labs <- c(
+  Atlantic_salmon = "Atlantic salmon (acclimated to 6 °C)",
+  Brook_trout     = "Brook trout (acclimated to 8 °C)",
+  Sand_goby       = "Sand goby (acclimated to 11 °C)",
+  Two_spot_goby   = "Two-spot goby (acclimated to 11 °C)",
+  Stickleback     = "Three-spined stickleback (acclimated to 18 °C)",
+  Black_goby      = "Black goby (acclimated to 18 °C)",
+  Pumpkinseed     = "Pumpkinseed sunfish (acclimated to 21 °C)",
+  Zebrafish       = "Zebrafish (acclimated to 28 °C)"
+)
+
+fig1_dat <- AllSpecies %>%
+  mutate(Species = factor(as.character(Species), levels = fig1_levels),
+         # translucent fill baked in, so the outline can stay fully opaque
+         pt_fill = grDevices::adjustcolor(
+           unname(species_cols[as.character(Species)]), alpha.f = 0.4))
+
+# mean and its 95% CI across the individuals of a species x stage cell
+fig1_summ <- fig1_dat %>%
+  group_by(Species, LifeStage) %>%
+  summarise(n = n(), mean_CTmax = mean(CTmax), se = sd(CTmax) / sqrt(n()),
+            .groups = "drop") %>%
+  mutate(lo = mean_CTmax - qt(0.975, n - 1) * se,
+         hi = mean_CTmax + qt(0.975, n - 1) * se)
+
+# Letters from the species-specific contrasts: two stages differ when the 95% HPD
+# interval of their contrast excludes zero. Brook trout larvae were not assayed,
+# so contrasts involving them are left out.
+fig1_letters <- species_tab %>%
+  mutate(Species  = gsub(" ", "_", Species),
+         contrast = gsub(" - ", "-", as.character(contrast)),
+         differ   = lower.HPD > 0 | upper.HPD < 0) %>%
+  filter(!(Species == "Brook_trout" & grepl("Larva", contrast))) %>%
+  group_by(Species) %>%
+  group_modify(~ {
+    lt <- multcompLetters(setNames(.x$differ, .x$contrast))$Letters
+    data.frame(LifeStage = names(lt), letter = unname(lt))
+  }) %>%
+  ungroup() %>%
+  mutate(Species   = factor(Species, levels = fig1_levels),
+         LifeStage = factor(LifeStage, levels = STAGE_LEVELS)) %>%
+  left_join(fig1_dat %>%
+              group_by(Species, LifeStage) %>%
+              summarise(ymax = max(CTmax), .groups = "drop"),
+            by = c("Species", "LifeStage"))
+```
+
+```{r}
+#| label: fig-allspecies
+#| fig-width: 11
+#| fig-height: 12
+#| fig-cap: "Thermal tolerance is relatively conserved across life stages (embryo, larva, immature adult, spawner). Acute upper thermal tolerance (CTmax) across four life stages in eight fish species (note that there is no larval data for brook trout). Each coloured point represents one individual, jittered horizontally; black points and whiskers show the mean CTmax ± 95% confidence interval for each life stage. Letters compare life stages within each species: stages that share a letter did not differ, because the 95% highest posterior density interval of their contrast in the Bayesian mixed model included zero."
+
+p_allspecies <- ggplot(fig1_dat, aes(LifeStage, CTmax, colour = Species)) +
+  # translucent fill with an opaque outline of the same colour
+  geom_jitter(aes(fill = pt_fill), shape = 21, width = 0.25, height = 0,
+              size = 3.5, stroke = 0.4) +
+  scale_fill_identity(guide = "none") +
+  geom_errorbar(data = fig1_summ, aes(LifeStage, ymin = lo, ymax = hi),
+                width = 0.25, linewidth = 0.6, colour = "black", inherit.aes = FALSE) +
+  geom_point(data = fig1_summ, aes(LifeStage, mean_CTmax),
+             colour = "black", size = 1.8, inherit.aes = FALSE) +
+  # letters sit just above the highest point of each life stage
+  geom_text(data = fig1_letters, aes(LifeStage, pmin(ymax + 2, 46), label = letter),
+            vjust = 0, size = 4, inherit.aes = FALSE) +
+  facet_wrap(~ Species, nrow = 4, labeller = labeller(Species = fig1_labs)) +
+  scale_colour_manual(values = species_cols, guide = "none") +
+  scale_x_discrete(limits = STAGE_LEVELS, drop = FALSE) +
+  scale_y_continuous(limits = c(13, 47), breaks = seq(10, 45, 5)) +
+  labs(x = NULL, y = "Upper thermal limit (°C)") +
+  theme_classic(base_size = 12) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.7),
+        axis.line = element_blank(), panel.grid = element_blank(),
+        panel.background = element_rect(fill = "white", colour = NA),
+        strip.background = element_blank(), strip.text = element_text(size = 10.5),
+        axis.text = element_text(colour = "black"),
+        # larger y title, pushed off the tick labels
+        axis.title.y = element_text(size = 16, margin = margin(r = 12)))
+p_allspecies
+
+ggsave("fig/Figure1_CTmax_life_stages.jpg", p_allspecies, width = 11, height = 12, dpi = 300)
+ggsave("fig/Figure1_CTmax_life_stages.pdf", p_allspecies, width = 11, height = 12)
+```
+
+## Figure 2: comparison with Dahlke et al. (2020)
+
+Here, we provide a comparison of our estimates to a comparative analysis from
+Dahlke et al. (2020). Our estimates were all produced using a consistent
+protocol across all eight species and four life stages. Dahlke et al. (2020)
+compiled upper thermal limits for 764 fish species, the broadest assessment of
+differences in heat tolerance between fish life stages to date. We compare the
+two datasets across the six species they share (Atlantic salmon, brook trout,
+sand goby, three-spined stickleback, black goby and zebrafish).
+
+From our data, we took the posterior median and 95% credible interval
+from our fitted Bayesian linear mixed model. Because we did not measure the
+CTmax of brook trout larvae, we left this value empty. Dahlke et al. (2020)
+reported one upper thermal limit estimate per species and life stage, either
+measured experimentally or imputed using phylogenetic data imputation
+(phylopars).
+
+The mean CTmax spanned 14.8 °C among the six species, from 26.2 °C in Atlantic
+salmon to 41.0 °C in zebrafish. Therefore, in panel (b) we expressed the CTmax
+of each life stage relative to its own immature stage before averaging, to place
+all six species on a similar scale. In panel (c), we report the difference
+between the warmest and coolest stage within each species. In both panels, we
+report a mean and 95% confidence interval across the six species.
+
+```{r}
+#| label: data-species-cmp
+
+dahlke_stage <- c(a_Spawner = "Spawner", b_Embryo = "Embryo",
+                  c_Larvae = "Larva",   d_Adult  = "Immature")
+
+sp6 <- c("Atlantic_salmon", "Brook_trout", "Sand_goby",
+         "Stickleback", "Black_goby", "Zebrafish")
+species_labs <- c(Atlantic_salmon = "Atlantic salmon", Brook_trout = "Brook trout",
+                  Sand_goby = "Sand goby", Stickleback = "Three-spined stickleback",
+                  Black_goby = "Black goby", Zebrafish = "Zebrafish")
+sci2int <- c("Salmo salar" = "Atlantic_salmon", "Salvelinus fontinalis" = "Brook_trout",
+             "Pomatoschistus minutus" = "Sand_goby", "Gasterosteus aculeatus" = "Stickleback",
+             "Gobius niger" = "Black_goby", "Danio rerio" = "Zebrafish")
+
+# our per species x stage means
+this_sp <- AllSpecies |>
+  filter(Species %in% sp6) |>
+  group_by(Species, LifeStage) |>
+  summarise(se = sd(CTmax) / sqrt(n()), CTmax = mean(CTmax), .groups = "drop") |>
+  mutate(Dataset = "This study", Imputed = FALSE)
+
+# Dahlke: one value per species x stage, flagged as measured or imputed
+dahlke_sp <- read_excel(
+    "data/Experimental_and_imputed_tolerance_data_Dahlke_et_al_2020.xlsx", "Tmax") |>
+  filter(SpeciesFishBase %in% names(sci2int)) |>
+  transmute(Species = unname(sci2int[SpeciesFishBase]),
+            LifeStage = factor(unname(dahlke_stage[Lifestage]), levels = STAGE_LEVELS),
+            CTmax = `Tmax (°C)`, se = NA_real_,
+            Dataset = "Dahlke", Imputed = Parameter == "Imputed")
+
+# model estimates and 95% credible intervals per species x stage
+emm_sp_grid <- emmeans(brms_model, ~ LifeStage * Species,
+                       re_formula = ~ (0 + LifeStage || Species))
+mc_sp <- as.matrix(as.mcmc(emm_sp_grid))     # one column per cell, in grid order
+sm_sp <- as.data.frame(summary(emm_sp_grid))
+stopifnot(ncol(mc_sp) == nrow(sm_sp))
+
+model_sp <- data.frame(
+  Species   = as.character(sm_sp$Species),
+  LifeStage = factor(as.character(sm_sp$LifeStage), levels = STAGE_LEVELS),
+  est       = apply(mc_sp, 2, median),
+  lo        = apply(mc_sp, 2, quantile, 0.025),
+  hi        = apply(mc_sp, 2, quantile, 0.975),
+  row.names = NULL) |>
+  filter(Species %in% sp6) |>
+  mutate(Species = factor(Species, levels = sp6))
+
+sp_cmp <- bind_rows(this_sp, dahlke_sp) |>
+  mutate(Species = factor(Species, levels = sp6),
+         xnum = as.integer(LifeStage))
+
+# One table for all three panels.
+prov_lev <- c("This study", "Previously reported (measured)",
+              "Previously reported (imputed)")
+sp_panel <- sp_cmp |>
+  left_join(model_sp, by = c("Species", "LifeStage")) |>
+  mutate(CTmax = if_else(Dataset == "This study", est, CTmax),
+         lo    = if_else(Dataset == "This study", lo, NA_real_),
+         hi    = if_else(Dataset == "This study", hi, NA_real_),
+         Provenance = factor(dplyr::case_when(
+           Dataset == "This study" ~ "This study",
+           Imputed                 ~ "Previously reported (imputed)",
+           TRUE                    ~ "Previously reported (measured)"), levels = prov_lev),
+         # every marker is outlined, so "open" means a white fill
+         sp_col  = unname(species_cols[as.character(Species)]),
+         pt_fill = if_else(Provenance == "Previously reported (imputed)", "white", sp_col),
+         xint = as.integer(LifeStage))
+
+# Each species relative to its own immature value. n_sp is 5 at Larva for this
+# study, since brook trout has no larval data.
+norm_sp <- sp_panel |>
+  filter(!is.na(CTmax)) |>
+  group_by(Dataset, Species) |>
+  mutate(rel = CTmax - CTmax[LifeStage == "Immature"]) |>
+  ungroup()
+
+norm_avg <- norm_sp |>
+  group_by(Dataset, LifeStage) |>
+  summarise(n_sp = n(), se = sd(rel) / sqrt(n()), rel = mean(rel), .groups = "drop") |>
+  mutate(lo = rel - qt(0.975, n_sp - 1) * se,
+         hi = rel + qt(0.975, n_sp - 1) * se,
+         dcol = ifelse(Dataset == "This study", "black", "grey45"),
+         xnum = as.integer(LifeStage) + ifelse(Dataset == "This study", -0.05, 0.05))
+```
+
+```{r}
+#| label: fig-species-panel
+#| fig-width: 11
+#| fig-height: 11
+#| fig-cap: "Upper thermal limits across life stages in the six species studied here, compared with values previously reported by Dahlke et al. (2020). (a) Variation in upper thermal limits across life stages. Posterior medians from this study are represented by circles (with 95% credible intervals) while previously reported estimates are presented with coloured (measured) or empty (imputed) squares. (b) Relative variation in upper thermal limits between life stages. Each species CTmax is set to zero at its immature value. Mean estimates and 95% confidence intervals across species are represented for this study (circles) and for previously reported values (squares). Faint coloured lines represent estimates for each individual species (solid for this study, long-dashed for previously reported values). (c) Range of variation in upper thermal limits across life stages. Estimates represent the difference between the warmest and coolest life stage within each species, with the mean and its 95% confidence interval across species shown as the white point estimates and error bars."
+
+stage_abbr <- c("Emb", "Lar", "Imm", "Spw")
+col_this   <- "black"
+col_dahlke <- "grey45"
+
+# (a) -----------------------------------------------------------------------
+p_facets <- ggplot(sp_panel, aes(xint, CTmax, colour = Species)) +
+  geom_line(aes(linetype = Dataset, group = Dataset, linewidth = Dataset)) +
+  scale_linewidth_manual(values = c("This study" = 1.3, "Dahlke" = 0.7),
+                         guide = "none") +
+  geom_linerange(data = filter(sp_panel, Dataset == "This study"),
+                 aes(ymin = lo, ymax = hi), linewidth = 1.5) +
+  geom_point(aes(shape = Provenance, fill = pt_fill),
+             colour = "black", size = 2.6, stroke = 0.6) +
+  facet_wrap(~ Species, nrow = 2, scales = "free_y",
+             labeller = labeller(Species = function(x) species_labs[x])) +
+  scale_colour_manual(values = species_cols, guide = "none") +
+  scale_fill_identity(guide = "none") +
+  scale_linetype_manual(values = c("This study" = "solid", "Dahlke" = "longdash"),
+                        guide = "none") +
+  scale_shape_manual(values = c("This study" = 21, "Previously reported (measured)" = 22,
+                                "Previously reported (imputed)" = 22), name = NULL) +
+  scale_x_continuous(breaks = 1:4, labels = stage_abbr, expand = expansion(add = 0.3)) +
+  labs(x = NULL, y = "Upper thermal limit (°C)") +
+  guides(shape = guide_legend(override.aes = list(
+    colour = "black", fill = c("black", "black", "white"), linetype = 0))) +
+  theme_classic(base_size = 12) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.7),
+        axis.line = element_blank(), panel.grid = element_blank(),
+        panel.background = element_rect(fill = "white", colour = NA),
+        strip.background = element_blank(), strip.text = element_text(size = 10.5),
+        axis.text = element_text(colour = "black"),
+        legend.position = c(0.006, 0.015), legend.justification = c(0, 0),
+        legend.direction = "vertical",
+        legend.background = element_rect(fill = "white", colour = NA),
+        legend.key = element_blank(), legend.key.height = unit(0.38, "cm"),
+        legend.spacing.y = unit(0.02, "cm"),
+        legend.text = element_text(size = 8.5))
+
+# (b) -----------------------------------------------------------------------
+# Faint coloured lines are the individual species, behind the overall means.
+lab_this   <- data.frame(x = 0.95, y = -21.2, lab = "This study")
+lab_dahlke <- data.frame(x = 0.95, y = -23.4, lab = "Previously reported")
+key_xy     <- data.frame(x = 0.85, y = c(-21.2, -23.4))
+
+p_norm <- ggplot() +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey60", linewidth = 0.5) +
+  geom_line(data = norm_sp, aes(xint, rel, colour = Species, linetype = Dataset,
+            group = interaction(Species, Dataset)), alpha = 0.4, linewidth = 0.45) +
+  geom_line(data = filter(norm_avg, Dataset == "Dahlke"), aes(xnum, rel),
+            colour = col_dahlke, linewidth = 1.2, linetype = "longdash") +
+  geom_line(data = filter(norm_avg, Dataset == "This study"), aes(xnum, rel),
+            colour = col_this, linewidth = 1.75, linetype = "solid") +
+  geom_rect(data = norm_avg, aes(xmin = xnum - 0.014, xmax = xnum + 0.014,
+            ymin = lo, ymax = hi, fill = dcol)) +
+  geom_point(data = filter(norm_avg, Dataset == "This study"), aes(xnum, rel),
+             shape = 21, fill = "white", colour = "black", stroke = 0.8, size = 4) +
+  geom_point(data = filter(norm_avg, Dataset == "Dahlke"), aes(xnum, rel),
+             shape = 22, fill = "white", colour = "black", stroke = 0.8, size = 4) +
+  # inline key: the same markers used for the two means
+  geom_point(data = key_xy[1, ], aes(x, y), shape = 21, fill = "white",
+             colour = "black", stroke = 0.8, size = 4) +
+  geom_point(data = key_xy[2, ], aes(x, y), shape = 22, fill = "white",
+             colour = "black", stroke = 0.8, size = 4) +
+  geom_text(data = lab_this,   aes(x, y, label = lab), hjust = 0, size = 4.2,
+            fontface = "bold", colour = col_this) +
+  geom_text(data = lab_dahlke, aes(x, y, label = lab), hjust = 0, size = 4.2,
+            fontface = "bold", colour = col_dahlke) +
+  scale_colour_manual(values = species_cols, guide = "none") +
+  scale_fill_identity(guide = "none") +
+  scale_linetype_manual(values = c("This study" = "solid", "Dahlke" = "longdash"),
+                        guide = "none") +
+  scale_x_continuous(breaks = 1:4, labels = STAGE_LEVELS,
+                     expand = expansion(add = c(0.3, 0.3))) +
+  labs(x = NULL, y = "Upper thermal limit relative to immature (°C)") +
+  theme_classic(base_size = 13) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+        axis.line = element_blank(), panel.grid = element_blank(),
+        axis.text = element_text(colour = "black"))
+
+# (c) -----------------------------------------------------------------------
+# Warmest minus coolest stage within each species. Brook trout is compared over
+# three stages rather than four.
+sp_range <- sp_panel |>
+  filter(!is.na(CTmax)) |>
+  group_by(Dataset, Species) |>
+  summarise(n_stage = n(), rng = max(CTmax) - min(CTmax), .groups = "drop") |>
+  mutate(xnum    = ifelse(Dataset == "This study", 1, 1.6),
+         xspread = xnum + (as.integer(Species) - 3.5) * 0.03)
+
+sp_range_avg <- sp_range |>
+  group_by(Dataset) |>
+  summarise(n_sp = n(), se = sd(rng) / sqrt(n()), mean_rng = mean(rng), .groups = "drop") |>
+  mutate(lo = mean_rng - qt(0.975, n_sp - 1) * se,
+         hi = mean_rng + qt(0.975, n_sp - 1) * se,
+         xnum = ifelse(Dataset == "This study", 1, 1.6))
+
+# Half-width set so the bar prints the same thickness as those in panel (b).
+p_range <- ggplot() +
+  geom_point(data = sp_range, aes(xspread, rng, fill = Species, shape = Dataset),
+             colour = "black", size = 3, stroke = 0.5) +
+  geom_rect(data = filter(sp_range_avg, Dataset == "This study"),
+            aes(xmin = xnum - 0.012, xmax = xnum + 0.012, ymin = lo, ymax = hi),
+            fill = col_this, alpha = 0.95) +
+  geom_rect(data = filter(sp_range_avg, Dataset == "Dahlke"),
+            aes(xmin = xnum - 0.012, xmax = xnum + 0.012, ymin = lo, ymax = hi),
+            fill = col_dahlke, alpha = 0.95) +
+  geom_point(data = sp_range_avg, aes(xnum, mean_rng, shape = Dataset),
+             fill = "white", colour = "black", size = 4.4, stroke = 0.9) +
+  scale_fill_manual(values = species_cols, labels = species_labs, name = NULL) +
+  scale_shape_manual(values = c("This study" = 21, "Dahlke" = 22), guide = "none") +
+  scale_x_continuous(breaks = c(1, 1.6), labels = c("This study", "Previously reported"),
+                     limits = c(0.7, 2.0), expand = expansion(mult = 0.01)) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0.02, 0.06))) +
+  labs(x = NULL, y = "Range across life stages (°C)") +
+  guides(fill = guide_legend(ncol = 1, override.aes = list(shape = 21, size = 3.2))) +
+  theme_classic(base_size = 13) +
+  theme(panel.border = element_rect(colour = "black", fill = NA, linewidth = 0.8),
+        axis.line = element_blank(), panel.grid = element_blank(),
+        axis.text = element_text(colour = "black"),
+        legend.position = c(0.005, 0.98), legend.justification = c(0, 1),
+        legend.background = element_rect(fill = NA, colour = NA),
+        legend.key = element_blank(), legend.key.height = unit(0.38, "cm"),
+        legend.text = element_text(size = 7.5))
+
+# (a) spans the top two grid rows; (b) and (c) share the third, 2:1 in width
+panel_design <- c(area(1, 1, 2, 3),
+                  area(3, 1, 3, 2),
+                  area(3, 3, 3, 3))
+
+p_species_panel <- p_facets + p_norm + p_range +
+  plot_layout(design = panel_design, heights = c(1, 1, 1.25)) +
+  plot_annotation(tag_levels = "a") &
+  theme(plot.tag = element_text(face = "bold", size = 14))
+p_species_panel
+
+ggsave("fig/Figure2_dahlke_comparison.jpg", p_species_panel, width = 11, height = 11, dpi = 300)
+ggsave("fig/Figure2_dahlke_comparison.pdf", p_species_panel, width = 11, height = 11)
+```
+
+Values behind panels (b) and (c). The immature stage is the reference stage in
+panel (b), so it is assigned a value of zero without an interval.
+
+```{r}
+#| label: figure2-tables
+
+dset_labs <- c("This study" = "This study", "Dahlke" = "Dahlke et al. 2020")
+
+norm_tbl <- norm_avg |>
+  mutate(Dataset = unname(dset_labs[as.character(Dataset)])) |>
+  arrange(Dataset, LifeStage) |>
+  select(Dataset, `Life stage` = LifeStage, `Species (n)` = n_sp,
+         `Mean (°C)` = rel, `CI lower` = lo, `CI upper` = hi)
+
+knitr::kable(norm_tbl, digits = 2,
+             caption = "Upper thermal limit relative to the immature stage, averaged across the six species.")
+
+range_tbl <- sp_range |>
+  mutate(Species = unname(species_labs[as.character(Species)]),
+         Dataset = unname(dset_labs[as.character(Dataset)])) |>
+  select(Dataset, Species, `Stages compared` = n_stage, `Range (°C)` = rng) |>
+  arrange(Dataset, desc(`Range (°C)`))
+
+knitr::kable(range_tbl, digits = 2,
+             caption = "Range of upper thermal limit across life stages, per species and dataset.")
+
+knitr::kable(sp_range_avg |>
+               mutate(Dataset = unname(dset_labs[as.character(Dataset)])) |>
+               select(Dataset, `Species (n)` = n_sp, `Mean range (°C)` = mean_rng,
+                      `CI lower` = lo, `CI upper` = hi),
+             digits = 2,
+             caption = "Across-species mean range and its 95% CI, per dataset.")
+```
+
+# Session information
+
+```{r}
+#| label: session-info
+sessionInfo()
+```

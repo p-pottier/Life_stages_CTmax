@@ -1,0 +1,7 @@
+"Diagnostic","Value","Threshold","Status"
+"Max split-R-hat",1.0019,"< 1.01","OK"
+"Min bulk-ESS",2172,"> 400","OK"
+"Min tail-ESS",4419,"> 400","OK"
+"Divergent transitions",6,"< 0.5% of 16000","OK"
+"Max-treedepth hits",6,"< 0.5% of 16000","OK"
+"Min E-BFMI",0.628,"> 0.2","OK"

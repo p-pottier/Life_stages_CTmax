@@ -1,0 +1,49 @@
+"contrast","Species","estimate","lower.HPD","upper.HPD"
+"Embryo - Larva","Atlantic salmon",-4.06277555,-4.87548719999999,-3.254324
+"Embryo - Immature","Atlantic salmon",-5.99041075,-7.0646848,-4.9888792
+"Embryo - Spawner","Atlantic salmon",-4.74181185,-5.7989528,-3.6919698
+"Larva - Immature","Atlantic salmon",-1.927015825,-2.8270705,-0.973528299999998
+"Larva - Spawner","Atlantic salmon",-0.688135899999999,-1.6007088,0.294856199999998
+"Immature - Spawner","Atlantic salmon",1.2507772,0.0932725999999988,2.3805399
+"Embryo - Larva","Black goby",-0.980302257999998,-1.7757598,-0.184949919999994
+"Embryo - Immature","Black goby",1.272715265,0.4463711,2.0895417
+"Embryo - Spawner","Black goby",1.407055405,0.569456800000001,2.24493263999999
+"Larva - Immature","Black goby",2.25833539,1.460624,3.05369388
+"Larva - Spawner","Black goby",2.39194298,1.57307365,3.22863686
+"Immature - Spawner","Black goby",0.136345204999996,-0.194347825000001,0.481720180000007
+"Embryo - Larva","Brook trout",-7.342141806,-18.8067665,5.3705045
+"Embryo - Immature","Brook trout",-2.69721051,-3.2248299,-2.1710703
+"Embryo - Spawner","Brook trout",-1.465355,-2.2080928,-0.726071699999999
+"Larva - Immature","Brook trout",4.665740185,-7.8008766,16.3340109
+"Larva - Spawner","Brook trout",5.88221079,-6.7147338,17.4533742
+"Immature - Spawner","Brook trout",1.23196825,0.578144399999999,1.8759019
+"Embryo - Larva","Pumpkinseed",0.0489142999999999,-1.67845389999999,1.7777107
+"Embryo - Immature","Pumpkinseed",1.3164314345,-0.416669900000002,3.2008066
+"Embryo - Spawner","Pumpkinseed",1.1161888,-0.696989299999998,2.956908
+"Larva - Immature","Pumpkinseed",1.281369,0.450118199999999,2.0988436
+"Larva - Spawner","Pumpkinseed",1.0837009,0.147616290000002,1.89753754000001
+"Immature - Spawner","Pumpkinseed",-0.192938750000003,-1.2294952,0.8057163
+"Embryo - Larva","Sand goby",0.389241849999998,-0.482230130000001,1.2764848
+"Embryo - Immature","Sand goby",1.30512785,-0.19446615,2.82135581
+"Embryo - Spawner","Sand goby",2.10799747,1.1913604,3.0392478
+"Larva - Immature","Sand goby",0.911111049999999,-0.585133100000004,2.4716021
+"Larva - Spawner","Sand goby",1.71478935,0.754050800000002,2.629751
+"Immature - Spawner","Sand goby",0.795327300000002,-0.7562353,2.34852395
+"Embryo - Larva","Stickleback",1.17706127,0.131775380000001,2.148205
+"Embryo - Immature","Stickleback",0.995343361,-0.568450149999997,2.57964145
+"Embryo - Spawner","Stickleback",1.094257334,0.126111330000001,2.07102387
+"Larva - Immature","Stickleback",-0.185917249999999,-1.77336649999999,1.2535215
+"Larva - Spawner","Stickleback",-0.0836099150000003,-0.904413880000007,0.749539470000009
+"Immature - Spawner","Stickleback",0.106638149999998,-1.32932890000001,1.57631416
+"Embryo - Larva","Two spot goby",0.962109775,-0.0189087800000003,1.9792151
+"Embryo - Immature","Two spot goby",1.0094133,-0.187398899999998,2.23463049999999
+"Embryo - Spawner","Two spot goby",2.928211805,1.87756659999999,4.041090266
+"Larva - Immature","Two spot goby",0.0361771264999984,-1.11643707,1.2318711
+"Larva - Spawner","Two spot goby",1.972166655,0.940380600000001,3.0536697
+"Immature - Spawner","Two spot goby",1.92654735,0.68885474,3.1908339
+"Embryo - Larva","Zebrafish",-1.1180656,-2.115276,-0.157870600000003
+"Embryo - Immature","Zebrafish",-0.934666500000002,-1.84729,-0.0167683999999966
+"Embryo - Spawner","Zebrafish",-0.81837445,-1.7110065,0.124242299999999
+"Larva - Immature","Zebrafish",0.180601200000002,-0.851760599999999,1.22392600000001
+"Larva - Spawner","Zebrafish",0.303239749999999,-0.742631299999999,1.3827014
+"Immature - Spawner","Zebrafish",0.113429649999997,-0.854526,1.12450389999999
